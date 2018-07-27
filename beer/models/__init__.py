@@ -19,7 +19,8 @@ _model_types = {
     'MixtureSet': mixtureset.create,
     'HMM': None,
     'PPCA': ppca.create,
-    'PLDASet': pldaset.create,
+    'PLDASet': pldaset.PLDASet.create,
+    'MarginalPLDASet': pldaset.MarginalPLDASet.create,
     'VAE': vae.create_vae,
     'NonLinearSubspaceModel': vae.create_non_linear_subspace_model,
     'NeuralNetwork': nnet.neuralnetwork.create

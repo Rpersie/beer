@@ -39,6 +39,67 @@ class PLDASet(BayesianModelSet):
 
     '''
 
+    @staticmethod
+    def create(model_conf, mean, variance, create_model_handle):
+        dtype, device = mean.dtype, mean.device
+        n_classes = model_conf['size']
+        dim_noise_subspace = model_conf['dim_noise_subspace']
+        dim_class_subspace = model_conf['dim_class_subspace']
+        noise_std = model_conf['noise_std']
+        prior_strength = model_conf['prior_strength']
+
+        # Precision.
+        shape = torch.tensor([prior_strength], dtype=dtype, device=device)
+        rate = torch.tensor([prior_strength * variance.sum()], dtype=dtype,
+                            device=device)
+        prior_prec = GammaPrior(shape, rate)
+        posterior_prec = GammaPrior(shape, rate)
+
+        # Global mean.
+        mean_variance = torch.tensor([1. / float(prior_strength)], dtype=dtype,
+                                    device=device)
+        prior_mean = NormalIsotropicCovariancePrior(mean, mean_variance)
+        posterior_mean = NormalIsotropicCovariancePrior(mean, mean_variance)
+
+        # Noise subspace.
+        noise_subspace = torch.zeros(dim_noise_subspace, len(mean), dtype=dtype,
+                                    device=device)
+        cov = torch.eye(noise_subspace.size(0), dtype=dtype, device=device)
+        cov /= prior_strength
+        prior_noise_subspace = MatrixNormalPrior(noise_subspace, cov)
+        rand_init = noise_subspace + noise_std * torch.randn(*noise_subspace.size(),
+                                                            dtype=dtype,
+                                                            device=device)
+        posterior_noise_subspace = MatrixNormalPrior(rand_init, cov)
+
+        # Class subspace.
+        class_subspace = torch.eye(dim_class_subspace, len(mean), dtype=dtype,
+                                    device=device)
+        cov = torch.eye(class_subspace.size(0), dtype=dtype, device=device)
+        cov /= prior_strength
+        prior_class_subspace = MatrixNormalPrior(class_subspace, cov)
+        rand_init = class_subspace + noise_std * torch.randn(*class_subspace.size(),
+                                                            dtype=dtype,
+                                                            device=device)
+        posterior_class_subspace = MatrixNormalPrior(rand_init, cov)
+
+        # cov = same as class subspace.
+        class_mean_priors, class_mean_posteriors = [], []
+        class_means_p = torch.eye(n_classes, dim_class_subspace, dtype=dtype,
+                                    device=device)
+        for mean_i in class_means_p:
+            class_mean_priors.append(NormalFullCovariancePrior(mean_i, cov))
+            class_mean_posteriors.append(NormalFullCovariancePrior(
+                mean_i + noise_std * torch.randn(mean_i.shape[0], dtype=dtype,
+                                                device=device),
+                cov)
+            )
+
+        return PLDASet(prior_mean, posterior_mean, prior_prec, posterior_prec,
+                       prior_noise_subspace, posterior_noise_subspace,
+                       prior_class_subspace, posterior_class_subspace,
+                       class_mean_priors, class_mean_posteriors)
+
     def __init__(self, prior_mean, posterior_mean, prior_prec, posterior_prec,
                  prior_noise_subspace, posterior_noise_subspace,
                  prior_class_subspace, posterior_class_subspace,
@@ -370,65 +431,131 @@ class PLDASet(BayesianModelSet):
         return torch.sum(resps * self.cache['l_kl_divs'].t(), dim=-1).detach()
 
 
-def create(model_conf, mean, variance, create_model_handle):
-    dtype, device = mean.dtype, mean.device
-    n_classes = model_conf['size']
-    dim_noise_subspace = model_conf['dim_noise_subspace']
-    dim_class_subspace = model_conf['dim_class_subspace']
-    noise_std = model_conf['noise_std']
-    prior_strength = model_conf['prior_strength']
+########################################################################
+# Probabilistic Linear Discriminant Analysis (PLDA) with a marginalized
+# noise subspace.
+########################################################################
 
-    # Precision.
-    shape = torch.tensor([prior_strength], dtype=dtype, device=device)
-    rate = torch.tensor([prior_strength * variance.sum()], dtype=dtype,
-                        device=device)
-    prior_prec = GammaPrior(shape, rate)
-    posterior_prec = GammaPrior(shape, rate)
+class MarginalPLDASet(BayesianModelSet):
+    '''Set of Normal distribution for the Probabilistic Linear
+    Discriminant Analysis (PLDA) model with a marginalized noise
+    subspace. This corresponds to a set of Normal densities with shared
+    covariances whose means are constrain to lie in a subspace.
 
-    # Global mean.
-    mean_variance = torch.tensor([1. / float(prior_strength)], dtype=dtype,
-                                 device=device)
-    prior_mean = NormalIsotropicCovariancePrior(mean, mean_variance)
-    posterior_mean = NormalIsotropicCovariancePrior(mean, mean_variance)
+    Attributes:
+        base_normal (:any:`Normal`): Normal model which is "wrapped"
+            to make this normal set.
+        class_subspace (``torch.Tensor[class_subspace_dim, data_dim]``):
+            Mean of the matrix defining the "class" subspace.
+            (across-class variations).
+        class_means: (``torch.Tensor[]``)
 
-    # Noise subspace.
-    noise_subspace = torch.zeros(dim_noise_subspace, len(mean), dtype=dtype,
-                                 device=device)
-    cov = torch.eye(noise_subspace.size(0), dtype=dtype, device=device)
-    cov /= prior_strength
-    prior_noise_subspace = MatrixNormalPrior(noise_subspace, cov)
-    rand_init = noise_subspace + noise_std * torch.randn(*noise_subspace.size(),
-                                                         dtype=dtype,
-                                                         device=device)
-    posterior_noise_subspace = MatrixNormalPrior(rand_init, cov)
+    '''
 
-    # Class subspace.
-    class_subspace = torch.eye(dim_class_subspace, len(mean), dtype=dtype,
-                                 device=device)
-    cov = torch.eye(class_subspace.size(0), dtype=dtype, device=device)
-    cov /= prior_strength
-    prior_class_subspace = MatrixNormalPrior(class_subspace, cov)
-    rand_init = class_subspace + noise_std * torch.randn(*class_subspace.size(),
-                                                         dtype=dtype,
-                                                         device=device)
-    posterior_class_subspace = MatrixNormalPrior(rand_init, cov)
+    @staticmethod
+    def create(model_conf, mean, variance, create_model_handle):
+        dtype, device = mean.dtype, mean.device
+        normal = create_model_handle(model_conf['base_normal'], mean, variance,
+                                     create_model_handle)
+        n_classes = model_conf['size']
+        dim_class_subspace = model_conf['dim_class_subspace']
+        noise_std = model_conf['noise_std']
+        prior_strength = model_conf['prior_strength']
 
-    # cov = same as class subspace.
-    class_mean_priors, class_mean_posteriors = [], []
-    class_means_p = torch.eye(n_classes, dim_class_subspace, dtype=dtype,
-                                device=device)
-    for mean_i in class_means_p:
-        class_mean_priors.append(NormalFullCovariancePrior(mean_i, cov))
-        class_mean_posteriors.append(NormalFullCovariancePrior(
-            mean_i + noise_std * torch.randn(mean_i.shape[0], dtype=dtype,
-                                             device=device),
-            cov)
-        )
+        # Class subspace.
+        class_subspace = torch.eye(dim_class_subspace, len(mean), dtype=dtype,
+                                    device=device)
+        cov = torch.eye(class_subspace.size(0), dtype=dtype, device=device)
+        cov /= prior_strength
+        prior_class_subspace = MatrixNormalPrior(class_subspace, cov)
+        rand_init = class_subspace + noise_std * torch.randn(*class_subspace.size(),
+                                                            dtype=dtype,
+                                                            device=device)
+        posterior_class_subspace = MatrixNormalPrior(rand_init, cov)
 
-    return PLDASet(prior_mean, posterior_mean, prior_prec, posterior_prec,
-                   prior_noise_subspace, posterior_noise_subspace,
-                   prior_class_subspace, posterior_class_subspace,
-                   class_mean_priors, class_mean_posteriors)
+        # cov = same as class subspace.
+        class_mean_priors, class_mean_posteriors = [], []
+        class_means_p = torch.eye(n_classes, dim_class_subspace, dtype=dtype,
+                                    device=device)
+        for mean_i in class_means_p:
+            class_mean_priors.append(NormalFullCovariancePrior(mean_i, cov))
+            class_mean_posteriors.append(NormalFullCovariancePrior(
+                mean_i + noise_std * torch.randn(mean_i.shape[0], dtype=dtype,
+                                                device=device),
+                cov)
+            )
+
+        return MarginalPLDASet(normal, prior_class_subspace,
+                               posterior_class_subspace,
+                               class_mean_priors, class_mean_posteriors)
 
 
-__all__ = ['PLDASet']
+    def __init__(self, normal, prior_class_subspace, posterior_class_subspace,
+                 prior_means, posterior_means):
+        '''
+        Args:
+            normal (:any:`Normal`): Normal model which will be "wrapped"
+                to make this normal set.
+            prior_class_subspace (``MatrixNormalPrior``): Prior over
+                the class subspace.
+            posterior_class_subspace (``MatrixNormalPrior``): Posterior
+                over the class subspace.
+            prior_means (``list``): List of prior distributions over
+                the class' means.
+            posterior_means (``list``): List of posterior distributions
+                over the class' means.
+
+        '''
+        super().__init__()
+        self.normal = normal
+        self.class_subspace_param = BayesianParameter(prior_class_subspace,
+                                                      posterior_class_subspace)
+        self.class_mean_params = BayesianParameterSet([
+            BayesianParameter(prior, posterior)
+            for prior, posterior in zip(prior_means, posterior_means)
+        ])
+        self._subspace_dim = self.class_subspace.shape[0]
+
+    @property
+    def class_subspace(self):
+        _, exp_value2 =  \
+            self.class_subspace_param.expected_value(concatenated=False)
+        return exp_value2
+
+    @property
+    def class_means(self):
+        means = []
+        for mean_param in self.class_mean_params:
+            _, mean = mean_param.expected_value(concatenated=False)
+            means.append(mean)
+        return torch.stack(means)
+
+    ####################################################################
+    # BayesianModel interface.
+    ####################################################################
+
+    def mean_field_factorization(self):
+        pass
+
+    def sufficient_statistics(self, data):
+        pass
+
+    def forward(self, s_stats):
+        pass
+
+    def accumulate(self, s_stats, parent_msg=None):
+        pass
+
+    ####################################################################
+    # BayesianModelSet interface.
+    ####################################################################
+
+    def __getitem__(self, key):
+        pass
+
+    def __len__(self):
+        return len(self.class_mean_params)
+
+
+
+__all__ = ['PLDASet', 'MarginalPLDASet']
