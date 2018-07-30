@@ -102,13 +102,11 @@ class EvidenceLowerBoundInstance:
             acc_stats = self._acc_stats[parameter]
             natural_grad = parameter.prior.natural_hparams + \
                 scale * acc_stats - parameter.posterior.natural_hparams
-
-            # NOTE: the gradient is always accumulated.
             parameter.natural_grad += natural_grad
 
 
 def evidence_lower_bound(model=None, minibatch_data=None, datasize=-1,
-                         kl_weight=1., **kwargs):
+                         kl_weight=1., fast_eval=False, **kwargs):
     '''Evidence Lower Bound objective function of Variational Bayes
     Inference.
 
@@ -130,6 +128,8 @@ def evidence_lower_bound(model=None, minibatch_data=None, datasize=-1,
             scaling will not affect the standard Bayesian model
             learning. This parameters is only affecting models like VAE
             that uses standard backpropagation.
+        fast_eval (boolean): If true, skip computing KL-divergence for the
+            global parameters.
         kwargs (object): Model specific extra parameters to evalute the
             ELBO.
 
@@ -177,15 +177,21 @@ def evidence_lower_bound(model=None, minibatch_data=None, datasize=-1,
     # Compute the ELBO.
     stats = model.sufficient_statistics(minibatch_data)
     exp_llh = model(stats, **kwargs)
-    local_kl_div = model.local_kl_div_posterior_prior()
-    kl_div = model.kl_div_posterior_prior()
-    elbo_value = scale * (exp_llh.sum() - kl_weight * local_kl_div.sum()) - \
-        kl_weight * kl_div
+    if not fast_eval:
+        kl_div = model.kl_div_posterior_prior().sum()
+    else:
+        kl_div = 0.
+    elbo_value = scale * exp_llh.sum() - kl_div
 
     # Accumulate the statistics and scale them accordingly.
     acc_stats = model.accumulate(stats)
 
-    return EvidenceLowerBoundInstance(elbo_value, acc_stats, model.parameters,
+    # Clean up intermediary results.
+    model.clear_cache()
+
+    return EvidenceLowerBoundInstance(elbo_value, acc_stats,
+
+                                      model.bayesian_parameters(),
                                       mb_datasize, datasize)
 
 
@@ -267,7 +273,7 @@ class BayesianModelCoordinateAscentOptimizer(BayesianModelOptimizer):
 
     '''
 
-    def __init__(self, *groups, lrate=1., std_optim=None):
+    def __init__(self, groups, lrate=1., std_optim=None):
         '''
         Args:
             ... (list): N List of ``BayesianParameter``.
@@ -279,7 +285,7 @@ class BayesianModelCoordinateAscentOptimizer(BayesianModelOptimizer):
         '''
         parameters = []
         for group in groups:
-            parameters += group
+            parameters += [param for param in group]
         super().__init__(parameters, lrate=lrate, std_optim=std_optim)
         self._groups = groups
         self._update_count = 0
