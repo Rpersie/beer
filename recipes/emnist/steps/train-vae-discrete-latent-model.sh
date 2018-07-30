@@ -2,11 +2,10 @@
 
 gpu=  # Empty variable means we don't use the GPU.
 lograte=100
-pt_epochs=5
 epochs=10
+kl_weight=1.
 lrate=.1
 lrate_nnet=1e-3
-nsamples=5
 train_cmd=utils/train-vae-discrete-latent-model.py
 
 usage() {
@@ -18,12 +17,6 @@ echo "\
 Train a Variational Auto-Encoder model with discrete latent
 variable prior (i.e. GMM or similar).
 
-Note:
-  The training has two stages, first the model is pre-trained
-  with the KL divergence term weighted to zero so the
-  encoder/decoder are decoupled from the latent prior. Then, the
-  second stage of the training is the standard optimization of
-  the ELBO function (KL divergence weight is set to 1).
 "
 usage
 echo "
@@ -33,20 +26,17 @@ Options:
   --unsupervised   unsupervised training (ignore the labels if
                    any)
   --lograte        log message rate
-  --pt-epochs      number of epochs for the pre-training
   --epochs         number of epochs for the training
+  --kl-weight      weight of the KL divergence of the ELBO (1.)
   --lrate          learning rate for the latent model
   --lrate-nnet     learning for the encoder/decoder networks
-  --nsamples       number of samples for the re-parameterization
-                   trick
 
 Example:
   \$ $0 \\
-            --pt-epochs=1 \\
+            --lograte=100 \\
             --epochs=10 \\
             --lrate=.1 \\
             --lrate-nnet=1e-3 \\
-            --nsamples=5 \\
             -- \\
             \"-l mem_free=1G,ram_free=1G\" \\
              /path/to/init.mdl \\
@@ -79,11 +69,10 @@ while [ $# -ge 0 ]; do
             shift
             ;;
         --lograte | \
-        --pt-epochs | \
         --epochs | \
+        --kl-weight | \
         --lrate | \
-        --lrate-nnet | \
-        --nsamples)
+        --lrate-nnet)
             eval ${optname}=${value}
             shift
             ;;
@@ -106,9 +95,6 @@ if [ $# -ne 5 ]; then
     exit 1
 fi
 
-echo lrate: ${lrate}
-echo lrate_nnet: ${lrate_nnet}
-
 sge_options=$1
 init_model=$2
 dbstats=$3
@@ -116,57 +102,9 @@ archives=$4
 root=$5
 
 # Build the output directory followin the parameters.
-outdir="${root}/ptepochs${pt_epochs}_epochs${epochs}_lrate${lrate}_lratennet${lrate_nnet}_nsamples${nsamples}"
-mkdir -p ${outdir}/pretraining ${outdir}/training
+outdir="${root}/epochs${epochs}_lrate${lrate}_lratennet${lrate_nnet}"
+mkdir -p ${outdir}
 
-################
-# Pre-training #
-################
-
-# Build the output directory followin the parameters.
-pretraining_options="\
---epochs ${pt_epochs}  \
-${gpu}  \
---lrate ${lrate}  \
---lrate-nnet ${lrate_nnet} \
---logging-rate ${lograte}  \
---dir-tmp-models ${outdir}/pretraining \
---nsamples ${nsamples} \
---kl-weight 0. \
-"
-
-if [ ! -f "${outdir}/pretraining/.done" ]; then
-    echo "Pre-training..."
-    # Command to submit to the SGE.
-    cmd="python "${train_cmd}" \
-        ${pretraining_options} \
-        ${dbstats} \
-        ${archives} \
-        ${init_model} \
-        ${outdir}/pretraining/final.mdl"
-
-    # Clear the log file.
-    rm -f ${outdir}/pretraining/sge.log
-
-    # Submit the command to the SGE.
-    qsub \
-        ${sge_options} \
-        -wd $(pwd)\
-        -j y \
-        -sync y \
-        -o ${outdir}/pretraining/sge.log \
-        utils/job.qsub \
-        "${cmd}" || exit 1
-
-    date > "${outdir}/pretraining/.done"
-else
-    echo "Model already pre-trained. Skipping."
-fi
-
-
-############
-# Training #
-############
 
 training_options="\
 --epochs ${epochs}  \
@@ -175,19 +113,18 @@ ${gpu}  \
 --lrate-nnet ${lrate_nnet} \
 --logging-rate ${lograte}  \
 --dir-tmp-models ${outdir}/training \
---nsamples ${nsamples} \
---kl-weight 1. \
+--kl-weight ${kl_weight} \
 "
 
-if [ ! -f "${outdir}/training/.done" ]; then
+if [ ! -f "${outdir}/.done" ]; then
     echo "Training..."
     # Command to submit to the SGE.
     cmd="python "${train_cmd}" \
         ${training_options} \
         ${dbstats} \
         ${archives} \
-        ${outdir}/pretraining/final.mdl \
-        ${outdir}/training/final.mdl"
+        ${init_model} \
+        ${outdir}/final.mdl"
 
     # Clear the log file.
     rm -f ${outdir}/training/sge.log
@@ -202,9 +139,9 @@ if [ ! -f "${outdir}/training/.done" ]; then
         utils/job.qsub \
         "${cmd}" || exit 1
 
-    cp "${outdir}/training/final.mdl" "${root}"
+    cp "${outdir}/final.mdl" "${root}"
 
-    date > "${outdir}/training/.done"
+    date > "${outdir}/.done"
 else
     echo "Model already trained. Skipping."
 fi

@@ -25,7 +25,8 @@ def run():
 
     # Load the model configuration file.
     with open(args.conf, 'r') as fid:
-        conf = yaml.load(fid)
+        data_str = fid.read().replace('<feadim>', str(len(mean)))
+        conf = yaml.load(data_str)
 
     # Create the model.
     model = beer.create_model(conf, mean, variance)
