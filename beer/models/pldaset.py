@@ -507,7 +507,7 @@ class MarginalPLDASet(BayesianModelSet):
 
         '''
         super().__init__()
-        self.normal = normal
+        self.base_normal = normal
         self.class_subspace_param = BayesianParameter(prior_class_subspace,
                                                       posterior_class_subspace)
         self.class_mean_params = BayesianParameterSet([
@@ -530,21 +530,152 @@ class MarginalPLDASet(BayesianModelSet):
             means.append(mean)
         return torch.stack(means)
 
+    def _get_expectation(self):
+        global_mean = self.base_normal.mean
+        global_precision = torch.inverse(self.base_normal.cov)
+
+        class_s_quad, class_s_mean = \
+            self.class_subspace_param.expected_value(concatenated=False)
+
+        # "class_s_quad" correspond to:
+        #   E[MM^T] = q * U + E[M] E[M^T]
+        # (where 'q' is the dimension of the subspace) w.r.t to the
+        # matrix normal prior. However, we need to compute the following
+        # expectation:
+        #   E[MAM^T] = U tr(A) + E[M] A E[M^T]
+        subspace_cov = (class_s_quad - class_s_mean @ class_s_mean.t())
+        subspace_cov /= self._subspace_dim
+        class_s_quad_prec = subspace_cov * torch.trace(global_precision)
+        class_s_quad_prec += class_s_mean @ global_precision @ class_s_mean.t()
+
+        class_mean_mean, class_mean_quad = [], []
+        for mean_param in self.class_mean_params:
+            mean_quad, mean = mean_param.expected_value(concatenated=False)
+            class_mean_mean.append(mean)
+            class_mean_quad.append(mean_quad)
+        return {
+            'mean': global_mean,
+            'precision': global_precision,
+            'class_s_quad_prec': class_s_quad_prec,
+            'class_s_mean': class_s_mean,
+            'class_mean_mean': torch.stack(class_mean_mean),
+            'class_mean_quad': torch.stack(class_mean_quad),
+            'subspace_cov': subspace_cov
+        }
+
     ####################################################################
     # BayesianModel interface.
     ####################################################################
 
     def mean_field_factorization(self):
-        pass
+        return self.base_normal.mean_field_factorization() + [
+            [*self.class_mean_params],
+            [self.class_subspace_param]
+        ]
 
     def sufficient_statistics(self, data):
-        pass
+        return data
 
-    def forward(self, s_stats):
-        pass
+    def forward(self, data):
+        exp_params = self._get_expectation()
+        global_mean = exp_params['mean']
+        global_precision = exp_params['precision']
+        c_s_mean = exp_params['class_s_mean']
+        c_s_quad_prec = exp_params['class_s_quad_prec']
+        c_m_mean = exp_params['class_mean_mean']
+        c_m_quad = exp_params['class_mean_quad']
 
-    def accumulate(self, s_stats, parent_msg=None):
-        pass
+        # Projection of the mean onto the observed space.
+        c_means = c_m_mean @ c_s_mean
+
+        # Log-likelihood of the base normal (common for all the
+        # components).
+        normal_stats = self.base_normal.sufficient_statistics(data)
+        normal_llh = self.base_normal(normal_stats)
+        self.cache['normal_stats'] = normal_stats
+
+        # Component specific computations.
+        prec_X_mean = (data - global_mean) @ global_precision
+        exp_llh = normal_llh[:, None] + prec_X_mean @ c_means.t()
+        exp_llh += -.5 * \
+            (c_m_quad.view(len(self), -1) @ c_s_quad_prec.view(-1))[None]
+
+        # Store intermediate results for the accumulation of the s.
+        # statistics.
+        self.cache['c_means'] = c_means
+        self.cache['prec_X_mean'] = prec_X_mean
+        self.cache['exp_params'] = exp_params
+
+        return exp_llh
+
+
+    def accumulate(self, data, parent_msg=None):
+        if parent_msg is None:
+            raise ValueError('"parent_msg" should not be None')
+        resps = parent_msg.detach()
+
+        c_means = self.cache['c_means']
+        c_s_mean = self.cache['exp_params']['class_s_mean']
+        c_s_quad_prec = self.cache['exp_params']['class_s_quad_prec']
+        prec_X_mean = self.cache['prec_X_mean']
+        c_m_quad = self.cache['exp_params']['class_mean_quad']
+        s_cov = self.cache['exp_params']['subspace_cov']
+
+        # Expected value w.r.t. of the matrix normal posterior of the
+        # quadratic term:
+        #   E[M^T v_z v_z^T M]
+        exp_m_quad = torch.sum(resps[:, :, None, None] * c_m_quad, dim=1)
+        idxs = torch.eye(len(c_m_quad)).view(-1).long()
+        trace = (s_cov * exp_m_quad).view(len(data), -1)[:, idxs].sum(dim=-1)
+        identity = torch.eye(data.shape[1], dtype=data.dtype, device=data.device)
+        quad_term = trace[:, None, None] * identity[None] + \
+            c_s_mean.t()[None] @ exp_m_quad @ c_s_mean
+
+        # E[(M^T v_z) x^T] + E[x^T (M^T v_z)]
+        exp_means = resps @ c_means
+        mean_term = exp_means[:, :, None] * data[:, None, :]
+        mean_term += data[:, :, None] * exp_means[:, None, :]
+
+        # xx^T
+        data_quad = (data[:, :, None] * data[:, None, :])
+
+        # Sufficient statistics for the base normal model.
+        n_stats = torch.cat([
+            (data_quad - mean_term + quad_term).view(len(data), -1),
+            data - exp_means,
+            torch.ones(data.size(0), 2, dtype=data.dtype, device=data.device),
+        ], dim=-1)
+        acc_stats = self.base_normal.accumulate(n_stats)
+
+        acc_class_s_stats1 = \
+            (resps @ class_mean_quad.view(len(self), -1)).sum(dim=0)
+        acc_class_s_stats1 = acc_class_s_stats1.view(self._subspace2_dim,
+                                                     self._subspace2_dim)
+        acc_class_s_stats1 = make_symposdef(acc_class_s_stats1)
+        data_noise_means = (data - noise_means - m_mean)
+        acc_means = (resps.t()[:, :, None] * data_noise_means).sum(dim=1)
+        acc_class_s_stats2 = acc_means[:, :, None] * class_mean_mean[:, None, :]
+        acc_class_s_stats2 = acc_class_s_stats2.sum(dim=0).t().contiguous().view(-1)
+        self.class_subspace_param:  torch.cat([
+                - .5 * prec * acc_class_s_stats1.view(-1),
+                prec * acc_class_s_stats2
+            ])
+
+        # Accumulate the statistics for the class means.
+        class_mean_acc_stats1 = c_s_quad_prec
+        class_mean_acc_stats1 = make_symposdef(class_mean_acc_stats1)
+        class_mean_acc_stats2 = resps.t()  @ prec_X_mean @ c_s_mean.t()
+        for i, mean_param in enumerate(self.class_mean_params):
+            class_mean_acc_stats = {
+                mean_param: torch.cat([
+                    -.5 * resps[:, i].sum() * class_mean_acc_stats1.view(-1),
+                    class_mean_acc_stats2[i]
+                ])
+            }
+            acc_stats.update(class_mean_acc_stats)
+
+        return acc_stats
+
 
     ####################################################################
     # BayesianModelSet interface.
@@ -555,7 +686,6 @@ class MarginalPLDASet(BayesianModelSet):
 
     def __len__(self):
         return len(self.class_mean_params)
-
 
 
 __all__ = ['PLDASet', 'MarginalPLDASet']
