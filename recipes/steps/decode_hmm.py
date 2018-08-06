@@ -4,7 +4,7 @@ import torch
 import pickle
 import numpy as np
 import sys
-sys.path.insert(0, '../../beer')
+sys.path.insert(0, './utils')
 import beer
 import argparse
 import funcs
@@ -26,7 +26,8 @@ def filter_text(old_text, dict_map=None, remove_sys = None):
     '''
     if dict_map is not None:
         if remove_sys is not None:
-            new_text = [dict_map[i] for i in old_text if i != remove_sys]
+            new_text = [dict_map[i] for i in old_text if (i != remove_sys) and 
+                (dict_map[i] != remove_sys)]
         else:
             new_text = [dict_map[i] for i in old_text]
     else:
@@ -48,8 +49,8 @@ def main():
         help='Probability to jump to new phone in transition matrix')
     parser.add_argument('--phone_39', type=str,
         help='Use 39 phonemes set')
-    parser.add_argument('--remove_sys', type=str,
-        help='Phoneme to be removed during scoring')
+    parser.add_argument('--remove_sys', default=str,
+        help='Phoneme to be removed for scoring')
     parser.add_argument('--score', action='store_true')
     #parser.add_argument('--use-gpu', action='store_true')
     args = parser.parse_args()
@@ -77,11 +78,11 @@ def main():
 
     dict_phone_ids, dict_state_to_phone = funcs.create_phone_dict(phonefile,
                                           nstate_per_phone)
-    if phone_39_map != "":
+    if phone_39_map != "None":
         dict_phone_39_map = funcs.create_48_39_phone_map(phone_39_map)
     else:
         dict_phone_39_map = None
-    if remove_sys == "":
+    if remove_sys == "None":
         remove_sys == None
 
     init_states = []
@@ -107,10 +108,11 @@ def main():
             ft = torch.from_numpy(feats[k]).float()
             best_path = hmm.decode(ft)
             hyp_phones = funcs.convert_state_to_phone(dict_state_to_phone,
-                         list(best_path.numpy()), nstate_per_phone)
+                         best_path.tolist(), nstate_per_phone)
             hyp_phones = filter_text(hyp_phones, dict_phone_39_map, remove_sys)
             dict_hyps[k] = hyp_phones
-            f.write(k + ' ' + ' '.join(hyp_phones) + '\n')
+            f.write(k + ' Trans: ' + ' '.join(dict_trans[k]) + '\n')
+            f.write(k + ' Hypot: ' + ' '.join(hyp_phones) + '\n')
 
     if score:
         logging.info('Scoring') 
