@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # Required
-modeldir="/export/b07/jyang/beer/recipes/timit/exp_feat_transformed_hmm_gmm_1/"
+modeldir="/export/b07/jyang/beer/recipes/timit/exp_feat_transformed_hmm_3s_gmm_16_noise_0.1/"
 decode_data_dir="/export/b07/jyang/beer/recipes/timit/data/test"
+nstate_per_phone=3
 feats=$decode_data_dir/feats_transformed.npz
 trans=$decode_data_dir/phones.text
 decode_dir=$modeldir/decode_test/
-model=$modeldir/hmm.mdl
+model=$modeldir/final.mdl
 phonelist="/export/b07/jyang/beer/recipes/timit/data/lang/phones.txt"
-nstate_per_phone=3
+
 
 # Optional
 gamma=0.5

@@ -1,36 +1,26 @@
 #!/bin/bash
 
-if [ $# -ne 5 ];then
-    echo "Prepare train and test data, and language directory"
-    echo "$0: phonemes_set, train_dir test_dir langdir"
-    echo "eg: $0 phones.txt data/train data/test data/lang"
+if [ $# -ne 3 ];then
+    echo "Prepare state id transcriptions and compute data statistics"
+    echo "$0: phonemes_set, data_dir num_states_per_phone"
+    echo "eg: $0 data/lang/phones.txt data/train 3"
     exit 1
 fi
 
 
 phones=$1
-traindir=$2
-testdir=$3
-langdir=$4
-nstate_per_phone=$5
+datadir=$2
+nstate_per_phone=$3
 rootdir=`pwd`
 
-if [ ! -d $langdir ]; then
-    mkdir -p $langdir
-    cp $phones $langdir/phones.txt
+
+if [ -d $datadir/tmp ]; then
+    rm -r $datadir/tmp
 fi
 
-# Skipping feature extraction part
-
-
-# Convert transcription from phonemes sequences to integers sequences
-#awk 'BEGIN{i=0}{print $1" "i;i++}' $phones > $langdir/phones.txt
-
-for d in $traindir $testdir; do
-    python3 steps/prepare_labels.py $langdir/phones.txt \
-        $d/phones.text \
-        $nstate_per_phone
-    python3 steps/accumulate_data_stats.py $d/feats.npz $d/feats_stats.npz
-    zip -j $d/states.int.npz $d/tmp/*.npy
-    rm -r $d/tmp
-done
+python3 steps/prepare_labels.py $langdir/phones.txt \
+    $datadir/phones.text \
+    $nstate_per_phone
+python3 steps/accumulate_data_stats.py $datadir/feats_transformed.npz $datadir/feats_stats.npz
+zip -j $datadir/states.int.npz $datadir/tmp/*.npy > /dev/null 2>&1
+rm -r $datadir/tmp

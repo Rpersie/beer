@@ -7,7 +7,7 @@ if [ $# -ne 2 ]; then
 fi
 setup=$1
 feat_conf=$2
-stage=1
+stage=-1
 . $setup
 . $feat_conf
 
@@ -29,10 +29,18 @@ $hmm_model_dir"
 
 if [ $stage -le 0 ]; then
     echo "Accumulating data stastics"
-    python3 steps/accumulate_data_stats.py $feats $feat_stats
+    python3 steps/accumulate_data_stats.py $feats $feat_stats || exit 1
 fi
 
 if [ $stage -le 1 ]; then
+    echo "Create state id transcription"
+    python3 steps/prepare_labels.py $phonelist $datadir/phones.text \
+        $nstate_per_phone || exit 1
+    zip -j $datadir/states.int.npz $datadir/tmp/*.npy > /dev/null 2>&1
+    rm -r $datadir/tmp
+fi
+
+if [ $stage -le 2 ]; then
     echo "Create emission models"
     python3 steps/create_emission.py $emiss_conf $feat_stats $hmm_model_dir || exit 1
 fi

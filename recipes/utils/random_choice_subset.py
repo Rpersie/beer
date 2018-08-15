@@ -8,7 +8,7 @@ datadir = sys.argv[1]
 num_utts = int(sys.argv[2])
 tgtdir = sys.argv[3]
 
-feats_file = datadir + '/feats.npz'
+feats_file = datadir + '/feats_transformed.npz'
 labels_file = datadir + '/states.int.npz'
 trans = datadir + '/phones.text'
 

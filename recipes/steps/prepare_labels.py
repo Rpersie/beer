@@ -5,6 +5,8 @@
 import argparse
 import numpy as np
 import os
+import sys
+sys.path.insert(0, './utils')
 from funcs import create_phone_dict
 
 def main():
